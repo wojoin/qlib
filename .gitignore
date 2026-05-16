@@ -29,7 +29,10 @@ examples/rl/checkpoints/
 examples/rl/outputs/
 examples/rl_order_execution/data/
 examples/rl_order_execution/outputs/
-examples/config/
+examples/data/
+*.json
+*.parquet
+*.log
 
 *.egg-info/
 
@@ -40,6 +43,7 @@ test-output.xml
 
 # special software
 mlruns/
+mlflow.db
 
 tags
 

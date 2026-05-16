@@ -8,13 +8,13 @@ from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
 
 CPO_UNIVERSE = "all"
 RECOMMEND_TOPK = 5
-
-
+PRED_HORIZON = 5
+LABEL_EXPR = f"Ref($close, -{PRED_HORIZON + 1}) / Ref($close, -1) - 1"
 
 
 
 def print_latest_recommendations(pred: pd.DataFrame, topk: int = RECOMMEND_TOPK):
-    """Print top-K recommendations from all 5 industry sectors (PCB, CPO, semiconductors, storage chips, optical fiber)."""
+    """Print top-K 5-day recommendations from all industry sectors."""
     latest_date = pred.index.get_level_values("datetime").max()
     latest_pred = (
         pred.xs(latest_date, level="datetime")
@@ -22,7 +22,7 @@ def print_latest_recommendations(pred: pd.DataFrame, topk: int = RECOMMEND_TOPK)
         .head(topk)
     )
 
-    print(f"\n最新行业推荐（{latest_date.date()}，涵盖 PCB/CPO/半导体/存储芯片/光纤）:")
+    print(f"\n最新 {PRED_HORIZON}-day 行业推荐（{latest_date.date()}，按未来 {PRED_HORIZON} 个交易日预期收益排序）:")
     for rank, (instrument, row) in enumerate(latest_pred.iterrows(), start=1):
         print(f"{rank}. {instrument}  score={row['score']:.6f}")
     return latest_pred
@@ -54,17 +54,28 @@ CPO_TASK = {
                 "module_path": "qlib.contrib.data.handler",
                 "kwargs": {
                     "start_time": "2020-01-01",
-                    "end_time": "2026-05-12",
+                    "end_time": "2026-05-11",
                     "fit_start_time": "2020-01-01",
                     "fit_end_time": "2024-12-31",
                     # CPO_UNIVERSE 读取当前 CPO 数据目录下的 instruments/all.txt
                     "instruments": CPO_UNIVERSE,
+                    "infer_processors": [
+                        {"class": "DropCol", "kwargs": {"col_list": ["Ref($close, -1)/$close - 1"]}},
+                        {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": True}},
+                        {"class": "Fillna", "kwargs": {"fields_group": "feature"}}
+                    ],
+                    "learn_processors": [
+                        {"class": "DropnaLabel"},
+                        {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}}
+                    ],
+                    # 5-day label: buy at T+1 close and sell at T+6 close.
+                    "label": [LABEL_EXPR],
                 },
             },
             "segments": {
                 "train": ("2020-01-01", "2024-12-31"),
                 "valid": ("2025-01-01", "2025-06-30"),
-                "test": ("2025-07-01", "2026-05-12"), # 包含你提到的最新数据点
+                "test": ("2025-07-01", "2026-05-11"), # 包含你提到的最新数据点
             },
         },
     },
@@ -77,7 +88,7 @@ if __name__ == "__main__":
     # qlib.init(provider_uri=provider_uri, region=REG_CN)
 
     # python scripts/akshareToBin.py --src examples/data/20260511 --max_workers 8
-    qlib.init(provider_uri="/Users/joseph/qlib/examples/data/20260512/qlib_data", region="cn")
+    qlib.init(provider_uri="/Users/joseph/qlib/examples/data/20260511/qlib_data", region="cn")
 
     cpo_instruments = D.instruments(CPO_UNIVERSE)
     cpo_stock_list = D.list_instruments(cpo_instruments, as_list=True)
@@ -110,7 +121,7 @@ if __name__ == "__main__":
         "backtest": {
             "start_time": "2025-07-01",
             # 回测需要访问下一交易日来生成交易区间，不能设置为本地日历最后一天
-            "end_time": "2026-05-11",
+            "end_time": "2026-05-10",
             "account": 10000000, # 1000万资金量
             # 当前 CPO 数据目录不包含 SH000300 指数行情，使用 CPO 股票池等权平均收益作为基准
             "benchmark": cpo_stock_list,
@@ -126,7 +137,7 @@ if __name__ == "__main__":
     }
 
     # 开始实验
-    with R.start(experiment_name="CPO_Strategy_Research"):
+    with R.start(experiment_name=f"CPO_{PRED_HORIZON}Day_Strategy_Research"):
         R.log_params(**flatten_dict(CPO_TASK))
         
         print("正在训练 CPO 行业模型...")

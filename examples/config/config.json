@@ -1,0 +1,9 @@
+{
+  "smtp_server": "smtp.qq.com",
+  "smtp_port": 465,
+  "smtp_user": "1003257670@qq.com",
+  "smtp_password": "auth_code_here",
+  "from_email": "1003257670@qq.com",
+  "to_emails": ["1003257670@qq.com", "wojoin@163.com"],
+  "email_subject": "CPO+PCB+半导体+存储芯片+光纤的最新研究结果"
+}

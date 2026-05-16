@@ -22,6 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from datetime import date
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -142,7 +143,7 @@ def convert(src: str, qlib_dir: str | None = None, max_workers: int = 4):
 
 def main():
     parser = argparse.ArgumentParser(description="Convert akshare parquet to qlib binary format")
-    parser.add_argument("--src", required=True, help="Source parquet file or directory of parquet files")
+    parser.add_argument("--src", required=False, help="Source parquet file or directory of parquet files")
     parser.add_argument(
         "--qlib_dir",
         default=None,
@@ -151,7 +152,11 @@ def main():
     parser.add_argument("--max_workers", type=int, default=4, help="Parallel workers (default: 4)")
     args = parser.parse_args()
 
-    convert(args.src, args.qlib_dir, args.max_workers)
+    today = date.today().strftime("%Y%m%d")
+    data_dir = Path(f"examples/data/{today}").expanduser()
+
+    # convert(args.src, args.qlib_dir, args.max_workers)
+    convert(data_dir, args.qlib_dir, args.max_workers)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,7 @@ EMAIL_CELL_WRAP_CHARS = 80
 
 def default_cpo_provider_uri(current_date: date | None = None) -> Path:
     current_date = current_date or date.today()
-    return Path.home() / "qlib" / "examples" / "data" / current_date.strftime("%Y%m%d") / "qlib_data"
+    return Path.home() / "ai" / "qlib" / "examples" / "data" / current_date.strftime("%Y%m%d") / "qlib_data"
 
 
 DEFAULT_CPO_PROVIDER_URI = default_cpo_provider_uri()
@@ -158,16 +158,17 @@ def strategy_kwargs_from_workflow(workflow_path: Path = DEFAULT_WORKFLOW_PATH) -
                 }
                 return {
                     "topk": int(kwargs.get("topk", 5)),
-                    "n_drop": int(kwargs.get("n_drop", 1)),
+                    "n_drop": int(kwargs.get("n_drop", 2)),
                 }
-    return {"topk": 5, "n_drop": 1}
+    return {"topk": 5, "n_drop": 2}
 
 
 def artifact_paths(run_dir: Path) -> dict[str, Path]:
     return {
         "params": run_dir / "artifacts" / "params.pkl",
         "pred": run_dir / "artifacts" / "pred.pkl",
-        "cpo_latest_recommendations": run_dir / "artifacts" / "cpo_latest_recommendations.pkl",
+        "1D_Short_Term": run_dir / "artifacts" / "1D_Short_Term.pkl",
+        "5D_Mid_Term": run_dir / "artifacts" / "5D_Mid_Term.pkl",
         "positions": run_dir
         / "artifacts"
         / "portfolio_analysis"
@@ -181,6 +182,14 @@ def artifact_paths(run_dir: Path) -> dict[str, Path]:
         / "portfolio_analysis"
         / "indicator_analysis_1day.pkl",
     }
+
+
+def artifact_display_name(name: str) -> str:
+    mapping = {
+        "1D_Short_Term": "1D Short-Term Recommendations",
+        "5D_Mid_Term": "5D Mid-Term Recommendations",
+    }
+    return mapping.get(name, name)
 
 
 def load_cpo_stock_list(provider_uri: Path = DEFAULT_CPO_PROVIDER_URI, universe: str = DEFAULT_CPO_UNIVERSE) -> list[str]:
@@ -621,7 +630,7 @@ def inspect_artifacts(run_dir: Path, rows: int, export_dir: Path | None, cpo_sto
         if not path.exists():
             continue
         print("=" * 88)
-        print(f"{name}: {path}")
+        print(f"{artifact_display_name(name)} ({name}): {path}")
         obj = load_pickle(path)
         if name == "pred":
             obj = validate_cpo_index(obj, cpo_stock_list, "pred.pkl")
@@ -763,6 +772,8 @@ def build_email_body(
     candidates: pd.DataFrame,
     indicator_analysis: Any,
     port_analysis: Any,
+    short_term_reco: Any = None,
+    mid_term_reco: Any = None,
     both_plan: list[str] | None = None,
     both_candidates: list[str] | None = None,
     sig_analysis: Any = None,
@@ -775,9 +786,17 @@ def build_email_body(
         f"<p><strong>Run directory:</strong> {html.escape(str(run_dir))}</p>",
         html_from_obj(plan, "Action Plan", note=plan_note),
         html_from_obj(candidates, "Candidate Top10", note=candidates_note),
-        html_from_obj(indicator_analysis, "Indicator Analysis"),
-        html_from_obj(port_analysis, "Port Analysis"),
     ]
+    if short_term_reco is not None:
+        parts.append(html_from_obj(short_term_reco, "1D Short-Term Recommendations"))
+    if mid_term_reco is not None:
+        parts.append(html_from_obj(mid_term_reco, "5D Mid-Term Recommendations"))
+    parts.extend(
+        [
+            html_from_obj(indicator_analysis, "Indicator Analysis"),
+            html_from_obj(port_analysis, "Port Analysis"),
+        ]
+    )
     if sig_analysis is not None:
         parts.append(html_from_obj(sig_analysis, "Signal Analysis (IC / Rank IC / ICIR / Rank ICIR)"))
     return "<html><body>" + "".join(parts) + "</body></html>"
@@ -993,13 +1012,15 @@ def main() -> None:
         paths = artifact_paths(run_dir)
         indicator_analysis = load_pickle(paths["indicator_analysis"]) if paths["indicator_analysis"].exists() else None
         port_analysis = load_pickle(paths["port_analysis"]) if paths["port_analysis"].exists() else None
+        short_term_reco = load_pickle(paths["1D_Short_Term"]) if paths["1D_Short_Term"].exists() else None
+        mid_term_reco = load_pickle(paths["5D_Mid_Term"]) if paths["5D_Mid_Term"].exists() else None
         sibling_plan = sibling_instruments(export_dir, "action_plan.csv")
         sibling_cands = sibling_instruments(export_dir, "candidate_top10.csv")
         plan_instruments = set(plan["instrument"].tolist()) if "instrument" in plan.columns else set()
         cand_instruments = set(candidates["instrument"].tolist()) if "instrument" in candidates.columns else set()
         both_plan = sorted(plan_instruments & sibling_plan)
         both_candidates = sorted(cand_instruments & sibling_cands)
-        body_html = build_email_body(run_dir, plan, candidates, indicator_analysis, port_analysis,
+        body_html = build_email_body(run_dir, plan, candidates, indicator_analysis, port_analysis, short_term_reco, mid_term_reco,
                                      both_plan=both_plan, both_candidates=both_candidates,
                                      sig_analysis=sig_analysis)
         send_email(

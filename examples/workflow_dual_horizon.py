@@ -5,9 +5,13 @@ from qlib.data import D
 from qlib.utils import init_instance_by_config, flatten_dict
 from qlib.workflow import R
 from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
-from datetime import date, timedelta
 
-CPO_UNIVERSE = "all"
+try:
+    from examples.dual_horizon_dates import get_data_dates
+except ModuleNotFoundError:
+    from dual_horizon_dates import get_data_dates
+
+TECH_UNIVERSE = "all"
 RECOMMEND_TOPK = 5
 NDROP = 2
 
@@ -26,37 +30,58 @@ def print_latest_recommendations(pred: pd.DataFrame, name: str, topk: int = RECO
     return latest_pred
 
 def run_dual_research():
-    today = date.today().strftime("%Y%m%d")
-    yesterday = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
+    today, yesterday = get_data_dates()
 
     # 初始化 Qlib
     # qlib.init(provider_uri="~/.qlib/qlib_data/my_cpo_data", region=REG_CN)
     qlib.init(provider_uri=f"~/qlib/examples/data/{today}/qlib_data", region="cn")
+
+
+    # 初始化 Qlib - 注入 M5 Pro 专属极致缓存
+    # qlib.init(
+    #     provider_uri=f"~/qlib/examples/data/{today}/qlib_data",
+    #     region="cn",
+    #     mem_cache_size_limit=0,   # 0 代表无上限！48G 内存足够把 605 只股的 5 年因子全塞进 RAM，二次运行秒开
+    #     expression_cache=True,    # 开启表达式缓存，避免 1D 和 5D 任务重复计算相同的 Alpha 基础因子
+    # )
     
     # 自动获取当前池子中的所有股票作为 benchmark 参考
-    cpo_stock_list = D.instruments(market=CPO_UNIVERSE)
+    cpo_stock_list = D.instruments(market=TECH_UNIVERSE)
 
     # 定义双周期任务：1-day 和 5-day
     horizons = {
         "1D_Short_Term": "Ref($close, -2) / Ref($close, -1) - 1",
         "5D_Mid_Term": "Ref($close, -6) / Ref($close, -1) - 1"
+        # 升级为截面中性化（减去当天这 605 只股票的平均涨幅，只赚取超越科技股平均水平的超额收益）：
+        # "5D_Mid_Term": "(Ref($close, -5) / Ref($close, -1) - 1) - CSMean(Ref($close, -5) / Ref($close, -1) - 1)"
     }
 
     # 公用的模型参数 (LightGBM)
     model_params = {
         "class": "LGBModel",
         "module_path": "qlib.contrib.model.gbdt",
+        # "kwargs": {
+        #     "loss": "mse",
+        #     "colsample_bytree": 0.8879,
+        #     "learning_rate": 0.2,
+        #     "subsample": 0.8789,
+        #     "lambda_l1": 205.6,
+        #     "lambda_l2": 580.9,
+        #     "max_depth": 8,
+        #     "num_leaves": 210,
+        #     "num_threads": 12, # 充分利用 M5 Pro 核心
+        # },
         "kwargs": {
             "loss": "mse",
-            "colsample_bytree": 0.8879,
-            "learning_rate": 0.2,
-            "subsample": 0.8789,
-            "lambda_l1": 205.6,
-            "lambda_l2": 580.9,
-            "max_depth": 8,
-            "num_leaves": 210,
-            "num_threads": 12, # 充分利用 M5 Pro 核心
-        },
+            "colsample_bytree": 0.85,
+            "learning_rate": 0.05,    # 🌟 降低学习率（从0.2降到0.05），让模型学得更稳
+            "subsample": 0.85,
+            "lambda_l1": 10.0,        # 🌟 科技股行业集中，不需要全市场那么恐怖的 L1 正则，大幅调低它
+            "lambda_l2": 50.0,        # 🌟 适当降低 L2 正则，松绑模型对强趋势科技股的拟合
+            "max_depth": 6,           # 🌟 限制树深（6层足够），防止过拟合
+            "num_leaves": 64,         # 🌟 叶子数与树深配套（2^6=64），保证基础泛化
+            "num_threads": 12,
+    },
     }
 
     for name, label_formula in horizons.items():
@@ -76,7 +101,7 @@ def run_dual_research():
                             "end_time": f"{today}",
                             "fit_start_time": "2020-01-01",
                             "fit_end_time": "2024-12-31",
-                            "instruments": CPO_UNIVERSE,
+                            "instruments": TECH_UNIVERSE,
                             "infer_processors": [
                                 {"class": "DropCol", "kwargs": {"col_list": ["Ref($close, -1)/$close - 1"]}},
                                 {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": True}},

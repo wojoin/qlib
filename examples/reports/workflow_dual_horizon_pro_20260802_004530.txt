@@ -1,0 +1,41 @@
+script=workflow_dual_horizon_pro.py
+experiment=Dual_Horizon_5D_Mid_Term
+timestamp=20260802_004530
+summary:
+- task=5D_Mid_Term
+- topk=5
+- n_drop=2
+- backtest=enabled
+metrics:
+- 1day.excess_return_with_cost.annualized_return: 0.054373747489170066
+- 1day.excess_return_with_cost.information_ratio: 0.13629789242407528
+- 1day.excess_return_with_cost.max_drawdown: -0.4101167089555451
+- 1day.excess_return_with_cost.mean: 0.00022846112390407592
+- 1day.excess_return_with_cost.std: 0.025858995292681108
+- 1day.excess_return_without_cost.annualized_return: 0.19387192631701894
+- 1day.excess_return_without_cost.information_ratio: 0.48666938232762363
+- 1day.excess_return_without_cost.max_drawdown: -0.377750882126215
+- 1day.excess_return_without_cost.mean: 0.0008145879257017602
+- 1day.excess_return_without_cost.std: 0.0258221513607205
+- 1day.ffr: 1.0
+- 1day.pa: 0.0
+- 1day.pos: 0.0
+- IC: 0.03403019060031234
+- ICIR: 0.2223774184534265
+- Rank IC: -0.01109250019935912
+- Rank ICIR: -0.06412032287279176
+details:
+prediction_preview:
+  datetime instrument    score
+2025-07-01   SH600105 0.987069
+2025-07-01   SH600110 0.980603
+2025-07-01   SH600171 0.370690
+2025-07-01   SH600176 0.588362
+2025-07-01   SH600183 0.831897
+latest_recommendations:
+instrument   score
+  SH688498 1.00000
+  SH688328 0.99591
+  SZ300604 0.99591
+  SH688249 0.99591
+  SZ301666 0.99182

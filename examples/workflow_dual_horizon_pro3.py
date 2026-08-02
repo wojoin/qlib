@@ -2,12 +2,16 @@ from pathlib import Path
 
 import qlib
 import pandas as pd
-from termcolor import colored
 from qlib.constant import REG_CN
 from qlib.data import D
 from qlib.utils import init_instance_by_config, flatten_dict
 from qlib.workflow import R
 from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
+from qlib.model.base import Model
+# 🌟 核心引入：引入 Alpha158 的时序特征字典，以及干净的通用处理器基类
+from qlib.contrib.data.handler import Alpha158
+from qlib.data.dataset.handler import DataHandlerLP
+import lightgbm as lgb
 
 try:
     from examples.dual_horizon_dates import get_data_dates
@@ -28,69 +32,113 @@ except ModuleNotFoundError:
         write_run_report,
     )
 
+# ==================== 🛠️ 自定义：工业级 LambdaRank 排序模型 ====================
+class LGBLambdaModel(Model):
+    def __init__(self, **kwargs):
+        self.params = kwargs
+        self.model = None
+
+    def _prepare_data_for_rank(self, dataset, segment):
+        df = dataset.prepare(segment, col_set=["feature", "label"])
+        df = df.sort_index(level="datetime")
+        
+        x = df["feature"]
+        raw_y = df["label"].iloc[:, 0]
+        
+        # 将标准收益率映射到 0-9 档的非负整数，用于 NDCG 排序优化
+        y_pct = raw_y.groupby(level="datetime").rank(pct=True, ascending=True)
+        y_int = (y_pct * 9).fillna(0).astype(int)
+        
+        group = df.groupby(level="datetime").size().values
+        return x, y_int, group
+
+    def fit(self, dataset, **kwargs):
+        x_train, y_train, group_train = self._prepare_data_for_rank(dataset, "train")
+        x_valid, y_valid, group_valid = self._prepare_data_for_rank(dataset, "valid")
+        
+        train_dataset = lgb.Dataset(x_train, label=y_train, group=group_train)
+        valid_dataset = lgb.Dataset(x_valid, label=y_valid, group=group_valid, reference=train_dataset)
+        
+        params = {
+            "objective": "lambdarank",
+            "metric": "ndcg",
+            "ndcg_eval_at": [5, 10],
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "num_leaves": 64,
+            "num_threads": 12,
+            "verbosity": -1,
+            "label_gain": [0, 1, 2, 3, 4, 15, 30, 60, 120, 250]
+        }
+        params.update(self.params)
+        
+        num_iterations = params.pop("num_iterations", 800)
+        early_stopping_rounds = params.pop("early_stopping_rounds", 50)
+        
+        callbacks = [lgb.early_stopping(early_stopping_rounds, verbose=False)] if early_stopping_rounds else []
+        
+        self.model = lgb.train(
+            params,
+            train_set=train_dataset,
+            num_boost_round=num_iterations,
+            valid_sets=[valid_dataset],
+            callbacks=callbacks
+        )
+
+    def predict(self, dataset, **kwargs):
+        if self.model is None:
+            raise ValueError("模型尚未进行训练！")
+        
+        df_test = dataset.prepare("test", col_set="feature")
+        raw_preds = self.model.predict(df_test)
+        
+        pred_series = pd.Series(raw_preds, index=df_test.index)
+        final_score = pred_series.groupby(level="datetime").rank(pct=True)
+        return final_score
+
+
 TECH_UNIVERSE = "all"
 RECOMMEND_TOPK = 5
 NDROP = 2
 
-
-
 def run_dual_research():
     today, yesterday = get_data_dates()
 
-    # 初始化 Qlib
-    # qlib.init(provider_uri="~/.qlib/qlib_data/my_cpo_data", region=REG_CN)
-    qlib.init(provider_uri=f"~/qlib/examples/data/{today}/qlib_data", region="cn")
-
-
-    # 初始化 Qlib - 注入 M5 Pro 专属极致缓存
-    # qlib.init(
-    #     provider_uri=f"~/qlib/examples/data/{today}/qlib_data",
-    #     region="cn",
-    #     mem_cache_size_limit=0,   # 0 代表无上限！48G 内存足够把 605 只股的 5 年因子全塞进 RAM，二次运行秒开
-    #     expression_cache=True,    # 开启表达式缓存，避免 1D 和 5D 任务重复计算相同的 Alpha 基础因子
-    # )
+    qlib.init(
+        provider_uri=f"~/qlib/examples/data/{today}/qlib_data",
+        region="cn"
+    )
     
-    # 自动获取当前池子中的所有股票作为 benchmark 参考
-    ai_stock_list = D.instruments(market=TECH_UNIVERSE)
+    cpo_stock_list = D.instruments(market=TECH_UNIVERSE)
 
-    # 定义双周期任务：1-day 和 5-day
+    # 🌟 统一公式写法（无空格标准时序表达式）
     horizons = {
-        "1D_Short_Term": "Ref($close, -2) / Ref($close, -1) - 1",
-        "5D_Mid_Term": "Ref($close, -6) / Ref($close, -1) - 1"
-        # 升级为截面中性化（减去当天这 605 只股票的平均涨幅，只赚取超越科技股平均水平的超额收益）：
-        # "5D_Mid_Term": "(Ref($close, -5) / Ref($close, -1) - 1) - CSMean(Ref($close, -5) / Ref($close, -1) - 1)"
+        "1D_Short_Term": "Ref($close,-2)/Ref($close,-1)-1",
+        "5D_Mid_Term": "Ref($close,-6)/Ref($close,-1)-1"
     }
 
-    # 公用的模型参数 (LightGBM)
     model_params = {
-        "class": "LGBModel",
-        "module_path": "qlib.contrib.model.gbdt",
-        # "kwargs": {
-        #     "loss": "mse",
-        #     "colsample_bytree": 0.8879,
-        #     "learning_rate": 0.2,
-        #     "subsample": 0.8789,
-        #     "lambda_l1": 205.6,
-        #     "lambda_l2": 580.9,
-        #     "max_depth": 8,
-        #     "num_leaves": 210,
-        #     "num_threads": 12, # 充分利用 M5 Pro 核心
-        # },
+        "class": LGBLambdaModel,
         "kwargs": {
-            "loss": "mse",
-            "colsample_bytree": 0.85,
-            "learning_rate": 0.05,    # 🌟 降低学习率（从0.2降到0.05），让模型学得更稳
+            "learning_rate": 0.05,
+            "max_depth": 6,
+            "num_leaves": 64,
             "subsample": 0.85,
-            "lambda_l1": 10.0,        # 🌟 科技股行业集中，不需要全市场那么恐怖的 L1 正则，大幅调低它
-            "lambda_l2": 50.0,        # 🌟 适当降低 L2 正则，松绑模型对强趋势科技股的拟合
-            "max_depth": 6,           # 🌟 限制树深（6层足够），防止过拟合
-            "num_leaves": 64,         # 🌟 叶子数与树深配套（2^6=64），保证基础泛化
+            "colsample_bytree": 0.80,
+            "lambda_l1": 5.0,
+            "lambda_l2": 15.0,
             "num_threads": 12,
-    },
+            "num_iterations": 800,
+            "early_stopping_rounds": 50,
+        },
     }
+
+    # 🌟 绝招：直接把 Alpha158 经典的 158 个时序特征定义拉出来，丢给通用的 DataHandlerLP
+    alpha158_instance = Alpha158(instruments=TECH_UNIVERSE, fit_start_time="2020-01-01", fit_end_time="2024-12-31")
+    alpha158_pure_features = alpha158_instance.get_feature_config()
 
     for name, label_formula in horizons.items():
-        print(colored(f"\n{'='*20} 开始处理 {name} 任务 {'='*20}", "red", attrs=["bold"]))
+        print(f"\n{'='*20} 开始处理 {name} 任务 {'='*20}")
         
         task_config = {
             "model": model_params,
@@ -99,8 +147,9 @@ def run_dual_research():
                 "module_path": "qlib.data.dataset",
                 "kwargs": {
                     "handler": {
-                        "class": "Alpha158", # 使用完整 Alpha158 数据处理器
-                        "module_path": "qlib.contrib.data.handler",
+                        # 🌟 放弃 Alpha158 类，改用绝对纯净的 DataHandlerLP
+                        "class": "DataHandlerLP",
+                        "module_path": "qlib.data.dataset.handler",
                         "kwargs": {
                             "start_time": "2020-01-01",
                             "end_time": f"{today}",
@@ -108,72 +157,77 @@ def run_dual_research():
                             "fit_end_time": "2024-12-31",
                             "instruments": TECH_UNIVERSE,
                             "infer_processors": [
-                                {"class": "DropCol", "kwargs": {"col_list": ["Ref($close, -1)/$close - 1"]}},
-                                {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": True}},
-                                {"class": "Fillna", "kwargs": {"fields_group": "feature"}}
+                                # 🌟 工业级未来函数绝杀法：直接把整个 label 组从推理矩阵中抹去，简单暴击
+                                {"class": "DropCol", "kwargs": {"col_list": ["label"]}},
+                                {
+                                    "class": "RobustZScoreNorm",
+                                    "kwargs": {
+                                        "fit_start_time": "2020-01-01",
+                                        "fit_end_time": "2024-12-31",
+                                        "fields_group": "feature",
+                                        "clip_outlier": True,
+                                    },
+                                },
+                                {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
+                                # 特征截面中性化：剥离科技行业整体 Beta
+                                {"class": "CSZScoreNorm", "kwargs": {"fields_group": "feature"}}
                             ],
                             "learn_processors": [
                                 {"class": "DropnaLabel"},
+                                # 用后置截面处理器对时序标签执行中性化，数学上完美等价于去中心化
                                 {"class": "CSZScoreNorm", "kwargs": {"fields_group": "label"}}
                             ],
-                            # 5-day label: buy at T+1 close and sell at T+6 close.
+                            "feature": alpha158_pure_features,
                             "label": [label_formula],
                         },
                     },
                     "segments": {
                         "train": ("2020-01-01", "2024-12-31"),
                         "valid": ("2025-01-01", "2025-06-30"),
-                        "test": ("2025-07-01", f"{today}"), # 包含你提到的最新数据点
+                        "test": ("2025-07-01", f"{today}"),
                     },
                 },
             },
         }
 
-        # 执行实验流程
         with R.start(experiment_name=f"Dual_Horizon_{name}"):
             R.log_params(**flatten_dict(task_config))
             
-            # 1. 训练
             model = init_instance_by_config(task_config["model"])
             dataset = init_instance_by_config(task_config["dataset"])
             model.fit(dataset)
             R.save_objects(**{"params.pkl": model})
             
-            # 2. 预测与指标分析 (IC/Rank IC/ICIR/Rank ICIR)并保存
             recorder = R.get_recorder()
             sr = SignalRecord(model, dataset, recorder)
             sr.generate(save=True)
             
-            # 3. 打印最新推荐结果
             pred = recorder.load_object("pred.pkl")
             latest_recommendations = print_latest_recommendations(pred, name)
             recorder.save_objects(**{f"{name}.pkl": latest_recommendations})
-            print(f"\n已完成 {name} 的最新推荐结果保存。")
+            print_colored_block(f"\n已完成 {name} 的最新推荐结果保存。")
 
             sar = SigAnaRecord(recorder)
             sar.generate()
             print_final_results(recorder, name, stage="信号分析")
             
-            # 4. 回测分析 (仅 5D 任务运行回测以节省时间，1D 仅看信号)
             if "5D" in name or "1D" in name:
                 print(f"\n正在对 {name} 进行组合回测分析...")
-                # 简单回测配置
                 port_analysis_config = {
                     "strategy": {
                         "class": "TopkDropoutStrategy",
                         "module_path": "qlib.contrib.strategy.signal_strategy",
                         "kwargs": {
                             "signal": (model, dataset),
-                            "topk": RECOMMEND_TOPK, # 仅持有行业内得分最高的 5 只股
+                            "topk": RECOMMEND_TOPK,
                             "n_drop": NDROP,
                         },
                     },
                     "backtest": {
                         "start_time": "2025-07-01",
-                        # 回测需要访问下一交易日来生成交易区间，不能设置为本地日历最后一天
                         "end_time": f"{yesterday}",
-                        "account": 300000,
-                        "benchmark": ai_stock_list,
+                        "account": 10000000,
+                        "benchmark": cpo_stock_list,
                         "exchange_kwargs": {
                             "freq": "day",
                             "limit_threshold": 0.095,
@@ -184,7 +238,6 @@ def run_dual_research():
                     },
                 }
 
-                # 回测分析
                 par = PortAnaRecord(recorder, port_analysis_config, "day")
                 par.generate()
                 print_final_results(recorder, name, stage="回测分析")

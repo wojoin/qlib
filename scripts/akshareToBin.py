@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from datetime import date
+from datetime import date, datetime, timedelta
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -141,6 +141,22 @@ def convert(src: str, qlib_dir: str | None = None, max_workers: int = 4):
     print(f'  qlib.init(provider_uri="{qlib_dir_path.resolve()}", region="cn")')
 
 
+def resolve_data_date(target_date: str | None = None) -> str:
+    if target_date:
+        for fmt in ("%Y%m%d", "%Y-%m-%d"):
+            try:
+                parsed_date = datetime.strptime(target_date, fmt).date()
+                return parsed_date.strftime("%Y%m%d")
+            except ValueError:
+                continue
+        raise ValueError(f"Invalid date: {target_date}. Expected YYYYMMDD or YYYY-MM-DD")
+
+    today = date.today()
+    if today.weekday() >= 5:
+        today -= timedelta(days=today.weekday() - 4)
+    return today.strftime("%Y%m%d")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert akshare parquet to qlib binary format")
     parser.add_argument("--src", required=False, help="Source parquet file or directory of parquet files")
@@ -150,13 +166,18 @@ def main():
         help="Target qlib data directory. Defaults to <source directory>/qlib_data.",
     )
     parser.add_argument("--max_workers", type=int, default=4, help="Parallel workers (default: 4)")
+    parser.add_argument(
+        "--date",
+        default=None,
+        help="Target date to use (YYYYMMDD or YYYY-MM-DD). Defaults to today, or the most recent Friday on weekends.",
+    )
     args = parser.parse_args()
 
-    today = date.today().strftime("%Y%m%d")
-    data_dir = Path(f"examples/data/{today}").expanduser()
+    resolved_date = resolve_data_date(args.date)
+    data_dir = Path(f"examples/data/{resolved_date}").expanduser()
+    src = args.src if args.src else str(data_dir)
 
-    # convert(args.src, args.qlib_dir, args.max_workers)
-    convert(data_dir, args.qlib_dir, args.max_workers)
+    convert(src, args.qlib_dir, args.max_workers)
 
 
 if __name__ == "__main__":

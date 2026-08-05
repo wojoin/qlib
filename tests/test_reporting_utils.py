@@ -16,6 +16,7 @@ def test_write_run_report_creates_report_file(tmp_path):
     assert isinstance(report_path, Path)
     assert report_path.exists()
     assert report_path.parent == tmp_path
+    assert "Dual_Horizon_1D_Short_Term" in report_path.name
     content = report_path.read_text(encoding="utf-8")
     assert "workflow_dual_horizon_pro2.py" in content
     assert "Dual_Horizon_1D_Short_Term" in content

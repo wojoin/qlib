@@ -39,7 +39,7 @@ def run_dual_research():
 
     # 初始化 Qlib
     # qlib.init(provider_uri="~/.qlib/qlib_data/my_cpo_data", region=REG_CN)
-    qlib.init(provider_uri=f"~/qlib/examples/data/{today}/qlib_data", region="cn")
+    qlib.init(provider_uri=f"~/ai/qlib/examples/data/{today}/qlib_data", region="cn")
 
 
     # 初始化 Qlib - 注入 M5 Pro 专属极致缓存

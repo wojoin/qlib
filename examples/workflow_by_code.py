@@ -45,7 +45,7 @@ if __name__ == "__main__":
 
     qlib.init(provider_uri=provider_uri, region=REG_CN, logging_config=logging_config)
     print(f"Qlib log file: {log_path}")
-    # qlib.init(provider_uri="/Users/joseph/qlib/examples/data/qlib_data", region=REG_CN)
+    # qlib.init(provider_uri="/Users/joseph/ai/qlib/examples/data/qlib_data", region=REG_CN)
 
     # 2. Instantiate model and dataset from config dicts using qlib's dependency injection pattern.
     # CSI300_GBDT_TASK["model"] contains {"class": "LGBModel", "module_path": ..., "kwargs": {...}}

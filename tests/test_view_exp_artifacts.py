@@ -9,6 +9,7 @@ from examples.view_exp_artifacts import (
     DEFAULT_EXPORT_DIR,
     action_plan,
     artifact_paths,
+    assess_strategy_quality,
     build_feature_diagnostics,
     candidate_top10,
     describe_dataframe,
@@ -151,6 +152,25 @@ class TestViewCPOArtifacts(unittest.TestCase):
         self.assertEqual(len(result), 10)
         self.assertEqual(result.iloc[0]["rank"], 1)
         self.assertIn("feature_reason", result.columns)
+
+    def test_assess_strategy_quality_reports_buy_observe_and_sell_lists(self):
+        plan = pd.DataFrame(
+            [
+                {"action": "BUY", "instrument": "000001", "score": 0.95},
+                {"action": "HOLD", "instrument": "000002", "score": 0.70},
+                {"action": "SELL", "instrument": "000003", "score": 0.10},
+            ]
+        )
+
+        summary = assess_strategy_quality(plan)
+
+        self.assertEqual(summary["overall"], "较好")
+        self.assertEqual(summary["buy_list"], ["000001"])
+        self.assertEqual(summary["observe_list"], ["000002"])
+        self.assertEqual(summary["sell_list"], ["000003"])
+        self.assertIn("买入", summary["summary_text"])
+        self.assertIn("观望", summary["summary_text"])
+        self.assertIn("卖出", summary["summary_text"])
 
 
 if __name__ == "__main__":

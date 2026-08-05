@@ -72,12 +72,12 @@ CPO_TASK = {
 
 if __name__ == "__main__":
     # provider_uri = "~/.qlib/qlib_data/cn_data"
-    # provider_uri = "/Users/joseph/qlib/examples/data/parquet/20260508/qlib_data"  # 假设你已经按照前面的说明准备好了这个目录
-    # provider_uri = "/Users/joseph/qlib/examples/data/20260511/qlib_data"  # 使用示例数据目录，包含 CPO 数据
+    # provider_uri = "/Users/joseph/ai/qlib/examples/data/parquet/20260508/qlib_data"  # 假设你已经按照前面的说明准备好了这个目录
+    # provider_uri = "/Users/joseph/ai/qlib/examples/data/20260511/qlib_data"  # 使用示例数据目录，包含 CPO 数据
     # qlib.init(provider_uri=provider_uri, region=REG_CN)
 
     # python scripts/akshareToBin.py --src examples/data/20260511 --max_workers 8
-    qlib.init(provider_uri="/Users/joseph/qlib/examples/data/20260512/qlib_data", region="cn")
+    qlib.init(provider_uri="/Users/joseph/ai/qlib/examples/data/20260512/qlib_data", region="cn")
 
     cpo_instruments = D.instruments(CPO_UNIVERSE)
     cpo_stock_list = D.list_instruments(cpo_instruments, as_list=True)

@@ -44,6 +44,7 @@ test-output.xml
 # special software
 mlruns/
 mlflow.db
+examples/reports/
 
 tags
 

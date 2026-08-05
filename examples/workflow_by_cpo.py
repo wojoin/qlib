@@ -147,7 +147,7 @@ CPO_TASK = {
 
 if __name__ == "__main__":
     # provider_uri = "~/.qlib/qlib_data/cn_data"
-    provider_uri = "/Users/joseph/qlib/examples/data/20260506/qlib_data"  # 假设你已经按照前面的说明准备好了这个目录
+    provider_uri = "/Users/joseph/ai/qlib/examples/data/20260506/qlib_data"  # 假设你已经按照前面的说明准备好了这个目录
     qlib.init(provider_uri=provider_uri, region=REG_CN)
 
     # 初始化模型和数据集

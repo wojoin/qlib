@@ -7,12 +7,14 @@ import ast
 import html
 import json
 import importlib.util
+import io
 import smtplib
 import textwrap
-from datetime import date
+from datetime import date, timedelta
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import pandas as pd
 
@@ -26,10 +28,21 @@ DEFAULT_FROM_EMAIL = "1003257670@qq.com"
 DEFAULT_TO_EMAILS = ["1003257670@qq.com", "wojoin@163.com"]
 DEFAULT_EMAIL_SUBJECT = "CPO PCB 半导体 存储 光纤"
 EMAIL_CELL_WRAP_CHARS = 80
+METRIC_HISTORY_PATH = Path("examples") / "metric_history" / "strategy_metrics_history.pkl"
+HISTORY_METRICS = ["IC", "ICIR", "Sharpe", "Sortino", "Calmar"]
+STRATEGY_NAMES = ["1D_Short_Term", "5D_Mid_Term", "Adaptive_Exit"]
+METRIC_THRESHOLDS = {"IC": 0.02, "ICIR": 0.5, "Sharpe": 1.0, "Sortino": 1.0, "Calmar": 0.5}
+
+
+def effective_trade_date(current_date: date | None = None) -> date:
+    current_date = current_date or date.today()
+    if current_date.weekday() >= 5:
+        return current_date - timedelta(days=current_date.weekday() - 4)
+    return current_date
 
 
 def default_cpo_provider_uri(current_date: date | None = None) -> Path:
-    current_date = current_date or date.today()
+    current_date = effective_trade_date(current_date)
     return Path.home() / "ai" / "qlib" / "examples" / "data" / current_date.strftime("%Y%m%d") / "qlib_data"
 
 
@@ -40,7 +53,7 @@ DEFAULT_TRAIN_RESULTS_DIR = Path("examples") / "data_train_results"
 
 
 def dated_email_subject(subject: str, current_date: date | None = None, exp_label: str | None = None) -> str:
-    current_date = current_date or date.today()
+    current_date = effective_trade_date(current_date)
     date_prefix = current_date.strftime("%Y%m%d")
     if subject.startswith(date_prefix):
         return subject
@@ -66,7 +79,7 @@ def default_export_dir_for_run(run_dir_spec: str | None, run_dir: Path) -> Path:
         name = Path(run_dir_spec).name
     else:
         name = run_dir_spec
-    date_str = date.today().strftime("%Y%m%d")
+    date_str = effective_trade_date().strftime("%Y%m%d")
     return DEFAULT_TRAIN_RESULTS_DIR / date_str / name
 
 
@@ -78,7 +91,29 @@ def latest_run_dir(experiment_dir: Path = DEFAULT_EXPERIMENT_DIR) -> Path:
     ]
     if not run_dirs:
         raise FileNotFoundError(f"No MLflow run directories found under {experiment_dir}")
-    return max(run_dirs, key=lambda path: path.stat().st_mtime)
+
+    def run_meta(path: Path) -> dict[str, str]:
+        meta_path = path / "meta.yaml"
+        if not meta_path.exists():
+            return {}
+        return {
+            key.strip(): value.strip().strip("'\"")
+            for line in meta_path.read_text(encoding="utf-8").splitlines()
+            if ":" in line
+            for key, value in [line.split(":", 1)]
+        }
+
+    def sort_time(path: Path) -> int:
+        value = run_meta(path).get("start_time")
+        return int(value) if value and value.isdigit() else int(path.stat().st_mtime * 1000)
+
+    successful = [
+        path
+        for path in run_dirs
+        if run_meta(path).get("status") in {"3", "FINISHED"}
+        and any(item.is_file() for item in artifact_dir(path).rglob("*"))
+    ]
+    return max(successful or run_dirs, key=sort_time)
 
 
 def _read_experiment_name(meta_path: Path) -> str | None:
@@ -131,7 +166,16 @@ def resolve_run_dir(spec: str | None) -> Path:
             return path
         return latest_run_dir(path)
     # Not an existing filesystem path — treat as experiment name
-    exp_dir = find_experiment_dir(spec)
+    try:
+        exp_dir = find_experiment_dir(spec)
+    except FileNotFoundError as exc:
+        if spec == "Adaptive_Exit":
+            raise FileNotFoundError(
+                "Adaptive_Exit experiment does not exist yet. Run "
+                "`conda run -n quant python3 examples/workflow_dual_horizon_pro2.py` "
+                "first to create its MLflow artifacts, then rerun this report command."
+            ) from exc
+        raise
     return latest_run_dir(exp_dir)
 
 
@@ -163,24 +207,46 @@ def strategy_kwargs_from_workflow(workflow_path: Path = DEFAULT_WORKFLOW_PATH) -
     return {"topk": 5, "n_drop": 2}
 
 
+def artifact_dir(run_dir: Path) -> Path:
+    """Resolve the artifact directory recorded by MLflow, with a local fallback."""
+    local_dir = run_dir / "artifacts"
+    meta_path = run_dir / "meta.yaml"
+    if not meta_path.exists():
+        return local_dir
+
+    for line in meta_path.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("artifact_uri:"):
+            continue
+        uri = line.split(":", 1)[1].strip().strip("'\"")
+        parsed = urlparse(uri)
+        if parsed.scheme == "file":
+            recorded_dir = Path(unquote(parsed.path))
+            if recorded_dir.is_dir():
+                return recorded_dir
+        elif not parsed.scheme:
+            recorded_dir = Path(uri).expanduser()
+            if recorded_dir.is_dir():
+                return recorded_dir
+        break
+    return local_dir
+
+
 def artifact_paths(run_dir: Path) -> dict[str, Path]:
+    root = artifact_dir(run_dir)
     return {
-        "params": run_dir / "artifacts" / "params.pkl",
-        "pred": run_dir / "artifacts" / "pred.pkl",
-        "1D_Short_Term": run_dir / "artifacts" / "1D_Short_Term.pkl",
-        "5D_Mid_Term": run_dir / "artifacts" / "5D_Mid_Term.pkl",
-        "positions": run_dir
-        / "artifacts"
-        / "portfolio_analysis"
-        / "positions_normal_1day.pkl",
-        "port_analysis": run_dir
-        / "artifacts"
-        / "portfolio_analysis"
-        / "port_analysis_1day.pkl",
-        "indicator_analysis": run_dir
-        / "artifacts"
-        / "portfolio_analysis"
-        / "indicator_analysis_1day.pkl",
+        "params": root / "params.pkl",
+        "pred": root / "pred.pkl",
+        "1D_Short_Term": root / "1D_Short_Term.pkl",
+        "5D_Mid_Term": root / "5D_Mid_Term.pkl",
+        "risk_metrics": root / "risk_metrics.pkl",
+        "strategy_metrics": root / "strategy_metrics.pkl",
+        "metrics_history": root / "metrics_history.pkl",
+        "current_positions": root / "current_positions.pkl",
+        "holding_actions": root / "holding_actions.pkl",
+        "holding_history": root / "holding_history.pkl",
+        "positions": root / "portfolio_analysis" / "positions_normal_1day.pkl",
+        "port_analysis": root / "portfolio_analysis" / "port_analysis_1day.pkl",
+        "indicator_analysis": root / "portfolio_analysis" / "indicator_analysis_1day.pkl",
     }
 
 
@@ -188,6 +254,11 @@ def artifact_display_name(name: str) -> str:
     mapping = {
         "1D_Short_Term": "1D Short-Term Recommendations",
         "5D_Mid_Term": "5D Mid-Term Recommendations",
+        "current_positions": "Current Strategy Positions",
+        "holding_actions": "Today's Position Actions",
+        "holding_history": "Position Action History",
+        "strategy_metrics": "Current Five-Metric Snapshot",
+        "metrics_history": "Five-Metric History",
     }
     return mapping.get(name, name)
 
@@ -523,24 +594,194 @@ def load_pickle(path: Path) -> Any:
     return pd.read_pickle(path)
 
 
+def load_position_tracking(run_dir: Path) -> dict[str, pd.DataFrame | None]:
+    """Load strategy position artifacts while remaining compatible with older runs."""
+    paths = artifact_paths(run_dir)
+    result: dict[str, pd.DataFrame | None] = {}
+    for name in ("current_positions", "holding_actions", "holding_history"):
+        path = paths[name]
+        result[name] = load_pickle(path) if path.exists() else None
+    return result
+
+
+def load_metrics_history(
+    run_dir: Path,
+    shared_path: Path = METRIC_HISTORY_PATH,
+) -> pd.DataFrame | None:
+    """Merge run-local and shared metric history, deduplicated by strategy and date."""
+    frames = []
+    artifact_path = artifact_paths(run_dir)["metrics_history"]
+    for path in (artifact_path, shared_path):
+        if path.exists():
+            frame = load_pickle(path)
+            if isinstance(frame, pd.DataFrame):
+                frames.append(frame)
+    if not frames:
+        return None
+    history = pd.concat(frames, ignore_index=True)
+    required = {"trade_date", "strategy", *HISTORY_METRICS}
+    missing = required.difference(history.columns)
+    if missing:
+        raise ValueError(f"指标历史缺少字段: {sorted(missing)}")
+    history["trade_date"] = pd.to_datetime(history["trade_date"]).dt.normalize()
+    return (
+        history.drop_duplicates(["trade_date", "strategy"], keep="last")
+        .sort_values(["trade_date", "strategy"])
+        .reset_index(drop=True)
+    )
+
+
+def assess_strategy_history(history: pd.DataFrame | None) -> pd.DataFrame:
+    """Assess effectiveness with transparent thresholds and recent-history trends."""
+    rows = []
+    for strategy in STRATEGY_NAMES:
+        subset = (
+            history.loc[history["strategy"] == strategy].sort_values("trade_date")
+            if history is not None
+            else pd.DataFrame()
+        )
+        valid = subset.dropna(subset=HISTORY_METRICS) if not subset.empty else subset
+        sample_count = len(valid)
+        if sample_count < 3:
+            rows.append(
+                {
+                    "strategy": strategy,
+                    "有效样本数": sample_count,
+                    "综合评分": float("nan"),
+                    "策略优先级": "待定",
+                    "是否有效": "数据不足",
+                    "是否需调整": "暂不判断",
+                    "建议": "至少积累 3 个交易日的完整五项指标后再判断，避免根据单日结果调整。",
+                }
+            )
+            continue
+
+        recent = valid.tail(min(5, sample_count))
+        averages = recent[HISTORY_METRICS].mean()
+        composite_score = sum(
+            max(-3.0, min(3.0, averages[metric] / METRIC_THRESHOLDS[metric]))
+            for metric in HISTORY_METRICS
+        ) / len(HISTORY_METRICS)
+        passed = [metric for metric in HISTORY_METRICS if averages[metric] >= METRIC_THRESHOLDS[metric]]
+        failed = [metric for metric in HISTORY_METRICS if metric not in passed]
+        effective = "有效" if len(passed) >= 4 else "观察" if len(passed) == 3 else "无效"
+
+        deteriorating = []
+        if sample_count >= 6:
+            previous = valid.iloc[-6:-3][HISTORY_METRICS].mean()
+            latest = valid.iloc[-3:][HISTORY_METRICS].mean()
+            deteriorating = [
+                metric
+                for metric in HISTORY_METRICS
+                if pd.notna(previous[metric])
+                and latest[metric] < previous[metric] - max(abs(previous[metric]) * 0.15, 0.02)
+            ]
+        needs_adjustment = effective == "无效" or len(deteriorating) >= 3
+        advice_parts = []
+        if failed:
+            advice_parts.append(f"重点改善未达标指标：{', '.join(failed)}")
+        if deteriorating:
+            advice_parts.append(f"最近三期明显走弱：{', '.join(deteriorating)}")
+        if not advice_parts:
+            advice_parts.append("当前参数可继续观察，避免仅因单日波动调整")
+        rows.append(
+            {
+                "strategy": strategy,
+                "有效样本数": sample_count,
+                "综合评分": composite_score,
+                "策略优先级": "",
+                "是否有效": effective,
+                "是否需调整": "需要" if needs_adjustment else "暂不需要",
+                "建议": "；".join(advice_parts),
+            }
+        )
+    result = pd.DataFrame(rows)
+    valid_scores = result["综合评分"].dropna()
+    if not valid_scores.empty:
+        priorities = valid_scores.rank(method="min", ascending=False).astype(int)
+        result.loc[priorities.index, "策略优先级"] = priorities.map(lambda value: f"第 {value} 优先")
+    return result
+
+
+def render_metrics_history_chart(history: pd.DataFrame) -> bytes:
+    """Render five vertically stacked metric line charts for all strategies."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(len(HISTORY_METRICS), 1, figsize=(12, 18), sharex=True)
+    colors = {"1D_Short_Term": "#1f77b4", "5D_Mid_Term": "#ff7f0e", "Adaptive_Exit": "#2ca02c"}
+    for ax, metric in zip(axes, HISTORY_METRICS):
+        for strategy in STRATEGY_NAMES:
+            subset = history.loc[history["strategy"] == strategy].sort_values("trade_date")
+            values = pd.to_numeric(subset[metric], errors="coerce")
+            valid = values.notna()
+            if valid.any():
+                ax.plot(
+                    subset.loc[valid, "trade_date"],
+                    values.loc[valid],
+                    marker="o",
+                    linewidth=1.8,
+                    markersize=3.5,
+                    label=strategy,
+                    color=colors[strategy],
+                )
+        ax.axhline(METRIC_THRESHOLDS[metric], color="#888888", linestyle="--", linewidth=1, label="Threshold")
+        ax.set_title(f"{metric} History")
+        ax.set_ylabel(metric)
+        ax.grid(alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+    axes[-1].set_xlabel("Trade Date")
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return buffer.getvalue()
+
+
 def load_sig_analysis(run_dir: Path) -> pd.DataFrame | None:
-    sig_dir = run_dir / "artifacts" / "sig_analysis"
+    sig_dir = artifact_dir(run_dir) / "sig_analysis"
     ic_path = sig_dir / "ic.pkl"
     ric_path = sig_dir / "ric.pkl"
-    if not ic_path.exists() or not ric_path.exists():
-        return None
-    ic = pd.read_pickle(ic_path).dropna()
-    ric = pd.read_pickle(ric_path).dropna()
-    return pd.DataFrame(
-        {
-            "value": {
+    values: dict[str, float] = {}
+    if ic_path.exists() and ric_path.exists():
+        ic = pd.read_pickle(ic_path).dropna()
+        ric = pd.read_pickle(ric_path).dropna()
+        values.update(
+            {
                 "IC": ic.mean(),
                 "Rank IC": ric.mean(),
                 "ICIR": ic.mean() / ic.std(),
                 "Rank ICIR": ric.mean() / ric.std(),
             }
-        }
-    )
+        )
+
+    strategy_metrics_path = artifact_paths(run_dir)["strategy_metrics"]
+    if strategy_metrics_path.exists():
+        strategy_metrics = pd.read_pickle(strategy_metrics_path)
+        if isinstance(strategy_metrics, pd.DataFrame) and not strategy_metrics.empty:
+            latest = strategy_metrics.sort_values("trade_date").iloc[-1]
+            for metric in HISTORY_METRICS:
+                if metric in latest.index:
+                    values[metric] = latest[metric]
+
+    risk_path = artifact_paths(run_dir)["risk_metrics"]
+    if risk_path.exists():
+        risk_metrics = pd.read_pickle(risk_path)
+        if isinstance(risk_metrics, pd.Series):
+            risk_metrics = risk_metrics.to_frame(name="value")
+        if isinstance(risk_metrics, pd.DataFrame) and "value" in risk_metrics.columns:
+            for metric in ("Sharpe", "Sortino", "Calmar"):
+                if metric in risk_metrics.index and metric not in values:
+                    values[metric] = risk_metrics.loc[metric, "value"]
+
+    if not values:
+        return None
+    display_order = ["IC", "Rank IC", "ICIR", "Rank ICIR", "Sharpe", "Sortino", "Calmar"]
+    ordered_values = {metric: values[metric] for metric in display_order if metric in values}
+    return pd.DataFrame({"value": ordered_values})
 
 
 def inspect_sig_analysis(run_dir: Path) -> pd.DataFrame | None:
@@ -548,7 +789,7 @@ def inspect_sig_analysis(run_dir: Path) -> pd.DataFrame | None:
     if sig is None:
         return None
     print("=" * 88)
-    print("sig_analysis (IC / Rank IC / ICIR / Rank ICIR)")
+    print("sig_analysis (IC / Rank IC / ICIR / Rank ICIR / Sharpe / Sortino / Calmar)")
     print(sig.to_string())
     return sig
 
@@ -746,6 +987,18 @@ def html_from_obj(obj: Any, title: str, max_rows: int = 30, note: str = "") -> s
     return title_html + note_html + f"<pre>{html.escape(str(obj))}</pre>"
 
 
+def format_position_dates_for_email(positions: pd.DataFrame) -> pd.DataFrame:
+    """Render position/action dates without time components while preserving source data."""
+    display_positions = positions.copy()
+    for column in ("trade_date", "entry_date", "last_updated"):
+        if column not in display_positions.columns:
+            continue
+        parsed = pd.to_datetime(display_positions[column], errors="coerce")
+        formatted = parsed.dt.strftime("%Y-%m-%d")
+        display_positions[column] = formatted.where(parsed.notna(), display_positions[column])
+    return display_positions
+
+
 def sibling_instruments(export_dir: Path | None, filename: str) -> set[str]:
     """Collect instruments from the same CSV file in sibling experiment directories."""
     if export_dir is None or not export_dir.parent.exists():
@@ -766,10 +1019,49 @@ def sibling_instruments(export_dir: Path | None, filename: str) -> set[str]:
     return instruments
 
 
+def assess_strategy_quality(plan: pd.DataFrame) -> dict[str, Any]:
+    if plan.empty:
+        return {
+            "overall": "中性",
+            "buy_list": [],
+            "observe_list": [],
+            "sell_list": [],
+            "summary_text": "当前无有效建议，策略评价为中性。",
+        }
+
+    actions = plan["action"].astype(str).str.upper()
+    buy_list = [str(item) for item in plan.loc[actions == "BUY", "instrument"].tolist()]
+    observe_list = [str(item) for item in plan.loc[actions == "HOLD", "instrument"].tolist()]
+    sell_list = [str(item) for item in plan.loc[actions == "SELL", "instrument"].tolist()]
+
+    buy_count = len(buy_list)
+    sell_count = len(sell_list)
+    if buy_count > sell_count:
+        overall = "较好"
+    elif sell_count > buy_count:
+        overall = "较差"
+    else:
+        overall = "中性"
+
+    summary_text = (
+        f"策略综合评价：{overall}。"
+        f"建议买入：{', '.join(buy_list) if buy_list else '无'}；"
+        f"建议观望：{', '.join(observe_list) if observe_list else '无'}；"
+        f"建议卖出：{', '.join(sell_list) if sell_list else '无'}。"
+    )
+    return {
+        "overall": overall,
+        "buy_list": buy_list,
+        "observe_list": observe_list,
+        "sell_list": sell_list,
+        "summary_text": summary_text,
+    }
+
+
 def build_email_body(
     run_dir: Path,
-    plan: pd.DataFrame,
-    candidates: pd.DataFrame,
+    plan: pd.DataFrame | None,
+    candidates: pd.DataFrame | None,
     indicator_analysis: Any,
     port_analysis: Any,
     short_term_reco: Any = None,
@@ -777,16 +1069,37 @@ def build_email_body(
     both_plan: list[str] | None = None,
     both_candidates: list[str] | None = None,
     sig_analysis: Any = None,
+    current_positions: pd.DataFrame | None = None,
+    holding_actions: pd.DataFrame | None = None,
+    strategy_advice: pd.DataFrame | None = None,
+    metrics_chart_cid: str | None = None,
 ) -> str:
-    trade_date = date.today().strftime("%Y%m%d")
+    trade_date = effective_trade_date().strftime("%Y%m%d")
     plan_note = f"Both: {' '.join(both_plan)}" if both_plan else ""
     candidates_note = f"Both: {' '.join(both_candidates)}" if both_candidates else ""
     parts = [
         f"<h1>交易日: {trade_date} Workflow 日报</h1>",
         f"<p><strong>Run directory:</strong> {html.escape(str(run_dir))}</p>",
-        html_from_obj(plan, "Action Plan", note=plan_note),
-        html_from_obj(candidates, "Candidate Top10", note=candidates_note),
     ]
+    if current_positions is not None:
+        email_positions = format_position_dates_for_email(current_positions)
+        parts.append(html_from_obj(email_positions, "当前策略持仓 / Current Strategy Positions"))
+    if holding_actions is not None:
+        email_actions = format_position_dates_for_email(holding_actions)
+        parts.append(html_from_obj(email_actions, "今日持仓动作 / Today's BUY, HOLD & SELL Actions"))
+    if metrics_chart_cid is not None:
+        parts.append(
+            '<h2>五项指标历史趋势</h2>'
+            f'<img src="cid:{html.escape(metrics_chart_cid)}" '
+            'alt="IC ICIR Sharpe Sortino Calmar history" '
+            'style="display:block;width:100%;max-width:1100px;height:auto;">'
+        )
+    if strategy_advice is not None:
+        parts.append(html_from_obj(strategy_advice, "三策略有效性与调整建议"))
+    if plan is not None:
+        parts.append(html_from_obj(plan, "Action Plan", note=plan_note))
+    if candidates is not None:
+        parts.append(html_from_obj(candidates, "Candidate Top10", note=candidates_note))
     if short_term_reco is not None:
         parts.append(html_from_obj(short_term_reco, "1D Short-Term Recommendations"))
     if mid_term_reco is not None:
@@ -798,7 +1111,20 @@ def build_email_body(
         ]
     )
     if sig_analysis is not None:
-        parts.append(html_from_obj(sig_analysis, "Signal Analysis (IC / Rank IC / ICIR / Rank ICIR)"))
+        parts.append(
+            html_from_obj(
+                sig_analysis,
+                "Signal & Risk Analysis (IC / Rank IC / ICIR / Rank ICIR / Sharpe / Sortino / Calmar)",
+            )
+        )
+    if plan is not None:
+        strategy_quality = assess_strategy_quality(plan)
+        parts.append(
+            f"<h2>策略好坏判断</h2><p>{html.escape(strategy_quality['summary_text'])}</p>"
+            f"<p><strong>建议结果:</strong> 1. 买入 {html.escape(' '.join(strategy_quality['buy_list'])) if strategy_quality['buy_list'] else '无'}；"
+            f"2. 观望 {html.escape(' '.join(strategy_quality['observe_list'])) if strategy_quality['observe_list'] else '无'}；"
+            f"3. 卖出 {html.escape(' '.join(strategy_quality['sell_list'])) if strategy_quality['sell_list'] else '无'}。</p>"
+        )
     return "<html><body>" + "".join(parts) + "</body></html>"
 
 
@@ -811,6 +1137,7 @@ def send_email(
     smtp_password: str,
     from_email: str,
     to_emails: list[str],
+    inline_images: dict[str, bytes] | None = None,
 ) -> None:
     message = EmailMessage()
     message["Subject"] = subject
@@ -818,6 +1145,9 @@ def send_email(
     message["To"] = ", ".join(to_emails)
     message.set_content("QLib workflow report. If you see this text, please use an HTML-capable email client.")
     message.add_alternative(body_html, subtype="html")
+    html_part = message.get_payload()[-1]
+    for cid, image_data in (inline_images or {}).items():
+        html_part.add_related(image_data, maintype="image", subtype="png", cid=f"<{cid}>")
 
     if smtp_port == 465:
         with smtplib.SMTP_SSL(smtp_server, smtp_port) as server:
@@ -998,31 +1328,65 @@ def main() -> None:
     inspect_artifacts(run_dir, args.rows, export_dir, cpo_stock_list)
     sig_analysis = inspect_sig_analysis(run_dir)
     inspect_specific_codes(run_dir, args.show_codes, cpo_stock_list)
-    if args.action_plan:
+    paths = artifact_paths(run_dir)
+    position_tracking = load_position_tracking(run_dir)
+    metrics_history = load_metrics_history(run_dir)
+    strategy_advice = assess_strategy_history(metrics_history)
+    metrics_chart_cid = "strategy-metrics-history"
+    metrics_chart = render_metrics_history_chart(metrics_history) if metrics_history is not None else None
+    if metrics_history is not None:
+        print("=" * 88)
+        print("five-metric history (IC / ICIR / Sharpe / Sortino / Calmar)")
+        print(metrics_history.to_string(index=False))
+        if export_dir is not None:
+            export_dir.mkdir(parents=True, exist_ok=True)
+            metrics_history.to_csv(export_dir / "metrics_history.csv", index=False)
+            (export_dir / "metrics_history.png").write_bytes(metrics_chart)
+    print("=" * 88)
+    print("strategy effectiveness and adjustment advice")
+    print(strategy_advice.to_string(index=False))
+    if export_dir is not None:
+        strategy_advice.to_csv(export_dir / "strategy_advice.csv", index=False)
+    if args.action_plan and paths["pred"].exists() and paths["positions"].exists():
         plan, candidates = inspect_action_plan(run_dir, topk, n_drop, export_dir, cpo_stock_list)
     else:
         plan, candidates = None, None
+        if args.action_plan and position_tracking["current_positions"] is not None:
+            print("action plan skipped: this strategy run contains position tracking but no backtest position artifact")
 
     if args.send_email:
         settings = merge_email_settings(args, config)
         if not settings["smtp_user"] or not settings["smtp_password"] or not settings["to_emails"]:
             raise ValueError("--send-email requires smtp_user, smtp_password, and to_emails from args or config")
-        if plan is None:
-            raise ValueError("--send-email requires --action-plan to generate action plan and candidate top1 content.")
-        paths = artifact_paths(run_dir)
+        if plan is None and position_tracking["current_positions"] is None:
+            raise ValueError(
+                "--send-email requires either --action-plan artifacts or current_positions.pkl"
+            )
         indicator_analysis = load_pickle(paths["indicator_analysis"]) if paths["indicator_analysis"].exists() else None
         port_analysis = load_pickle(paths["port_analysis"]) if paths["port_analysis"].exists() else None
         short_term_reco = load_pickle(paths["1D_Short_Term"]) if paths["1D_Short_Term"].exists() else None
         mid_term_reco = load_pickle(paths["5D_Mid_Term"]) if paths["5D_Mid_Term"].exists() else None
         sibling_plan = sibling_instruments(export_dir, "action_plan.csv")
         sibling_cands = sibling_instruments(export_dir, "candidate_top10.csv")
-        plan_instruments = set(plan["instrument"].tolist()) if "instrument" in plan.columns else set()
-        cand_instruments = set(candidates["instrument"].tolist()) if "instrument" in candidates.columns else set()
+        plan_instruments = (
+            set(plan["instrument"].tolist())
+            if plan is not None and "instrument" in plan.columns
+            else set()
+        )
+        cand_instruments = (
+            set(candidates["instrument"].tolist())
+            if candidates is not None and "instrument" in candidates.columns
+            else set()
+        )
         both_plan = sorted(plan_instruments & sibling_plan)
         both_candidates = sorted(cand_instruments & sibling_cands)
         body_html = build_email_body(run_dir, plan, candidates, indicator_analysis, port_analysis, short_term_reco, mid_term_reco,
                                      both_plan=both_plan, both_candidates=both_candidates,
-                                     sig_analysis=sig_analysis)
+                                     sig_analysis=sig_analysis,
+                                     current_positions=position_tracking["current_positions"],
+                                     holding_actions=position_tracking["holding_actions"],
+                                     strategy_advice=strategy_advice,
+                                     metrics_chart_cid=metrics_chart_cid if metrics_chart is not None else None)
         send_email(
             subject=settings["email_subject"],
             body_html=body_html,
@@ -1032,6 +1396,7 @@ def main() -> None:
             smtp_password=settings["smtp_password"],
             from_email=settings["from_email"],
             to_emails=settings["to_emails"],
+            inline_images={metrics_chart_cid: metrics_chart} if metrics_chart is not None else None,
         )
         print(f"Email sent to: {', '.join(settings['to_emails'])}")
 

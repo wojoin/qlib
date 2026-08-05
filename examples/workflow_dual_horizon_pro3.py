@@ -105,7 +105,7 @@ def run_dual_research():
     today, yesterday = get_data_dates()
 
     qlib.init(
-        provider_uri=f"~/qlib/examples/data/{today}/qlib_data",
+        provider_uri=f"~/ai/qlib/examples/data/{today}/qlib_data",
         region="cn"
     )
     

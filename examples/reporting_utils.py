@@ -80,7 +80,11 @@ def write_run_report(
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_script = Path(script_name).stem
-    report_path = output_dir / f"{safe_script}_{timestamp}.txt"
+    safe_experiment = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "_"
+        for character in experiment_name
+    ).strip("_")
+    report_path = output_dir / f"{safe_script}_{safe_experiment}_{timestamp}.txt"
 
     lines = [
         f"script={script_name}",
